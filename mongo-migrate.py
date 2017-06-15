@@ -120,8 +120,8 @@ class App():
         threads = []
         dbs_to_skip = [ 'admin', 'local']
         colls_to_skip = [ 'system.indexes' ]
-        number_source_dbs = len(source_dbs['databases'])
-
+        number_source_dbs = len(source_dbs['databases']) - len(dbs_to_skip)
+        db_count = 0
         for database in source_dbs['databases']:
             self.logger.debug('working on source db %s' % str(database))
             if database['name'] in dbs_to_skip:
@@ -129,7 +129,8 @@ class App():
                 continue
 
             source_colls = source_mongo[database['name']].collection_names()
-            number_source_colls = len(source_colls)
+            number_source_colls = len(source_colls) - len(colls_to_skip)
+            coll_count = 0
             self.logger.debug('source collections = %s' % str(source_colls))
             for coll in source_colls:
                 if coll in colls_to_skip:
@@ -149,8 +150,12 @@ class App():
                         threads = [t.join(5) for t in threads if t is not None and t.isAlive()]
                         ii = 0
                         for t in threads:
+                            if t is None or not t.isAlive:
+                                coll_count +=1
                             self.logger.debug('* %d *********** %s' % (ii,str(t)))
                             ii+=1
+                        self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
+                        self.logger.info("Status %d out of %d collections for db=%s complete" % (coll_count,number_source_colls,database['name']))
                     threads = []
 
 
@@ -163,11 +168,16 @@ class App():
                     threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
                     ii = 0
                     for t in threads:
+                        if t is None or not t.isAlive:
+                            coll_count +=1
                         self.logger.debug('*  %d  *********** %s' % (ii,str(t)))
                         ii+=1
                     self.logger.debug('treads: %s' % str(threads))
                     if len(threads)==0:
                         wait=False
+            db_count +=1
+            self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
+            self.logger.info("Status %d out of %d collections for db=%s complete" % (coll_count,number_source_colls,database['name']))
 
         self.logger.info("Initial sync complete")
         return self.initial_sync_status['last_source_oplog_entry']
@@ -298,6 +308,7 @@ class App():
                 time.sleep(self.args.tailSleepTimeSeconds)
                 sleep_cycles += 1
                 if (sleep_cycles % self.args.collectionCheckSleepCycles)==0:
+                    self.logger.info("sleeping...")
                     self.run_collection_checks()
 
     def run_collection_checks(self):
