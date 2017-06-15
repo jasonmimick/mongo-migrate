@@ -120,6 +120,8 @@ class App():
         threads = []
         dbs_to_skip = [ 'admin', 'local']
         colls_to_skip = [ 'system.indexes' ]
+        number_source_dbs = len(source_dbs['databases'])
+
         for database in source_dbs['databases']:
             self.logger.debug('working on source db %s' % str(database))
             if database['name'] in dbs_to_skip:
@@ -127,6 +129,7 @@ class App():
                 continue
 
             source_colls = source_mongo[database['name']].collection_names()
+            number_source_colls = len(source_colls)
             self.logger.debug('source collections = %s' % str(source_colls))
             for coll in source_colls:
                 if coll in colls_to_skip:
@@ -143,7 +146,11 @@ class App():
                     [t.start() for t in threads]
 
                     while True:
-                        threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
+                        threads = [t.join(5) for t in threads if t is not None and t.isAlive()]
+                        ii = 0
+                        for t in threads:
+                            self.logger.debug('* %d *********** %s' % (ii,str(t)))
+                            ii+=1
                     threads = []
 
 
@@ -154,6 +161,10 @@ class App():
                 wait=True
                 while wait:
                     threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
+                    ii = 0
+                    for t in threads:
+                        self.logger.debug('*  %d  *********** %s' % (ii,str(t)))
+                        ii+=1
                     self.logger.debug('treads: %s' % str(threads))
                     if len(threads)==0:
                         wait=False
@@ -183,7 +194,13 @@ class App():
         source_cursor = source_mongo[db][collection].find({},modifiers={"$snapshot":True})
         while ( source_cursor.alive ):
             try:
-                bulk.insert( source_cursor.next() )
+                doc = source_cursor.next()
+                try:
+                    bulk.insert( doc )
+                except Exception as insert_exp:
+                    self.logger.error("Error attempting to insert document from %s.%s document=%s" % (db,collection,doc))
+                    self.logger.error("%s" % insert_exp)
+                    continue
                 doc_count += 1
                 if (doc_count == batch_size ):
                     r = bulk.execute()
