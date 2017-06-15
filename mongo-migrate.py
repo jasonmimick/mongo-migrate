@@ -10,7 +10,9 @@
 #
 
 import datetime
+import urllib
 import pymongo
+from pymongo.cursor import CursorType
 import time
 import logging
 import sys, os
@@ -178,7 +180,7 @@ class App():
         doc_count = 0
         bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
         batch_size = self.args.initialSyncBatchSize
-        source_cursor = source_mongo[db][collection].find({},snapshot=True)
+        source_cursor = source_mongo[db][collection].find({},modifiers={"$snapshot":True})
         while ( source_cursor.alive ):
             try:
                 bulk.insert( source_cursor.next() )
@@ -254,7 +256,7 @@ class App():
 
         self.logger.debug('tail_oplog starting ts=%s' % str(query['ts']))
         #start tailable cursor
-        oplog = source_mongo['local']['oplog.rs'].find(query,tailable=True)
+        oplog = source_mongo['local']['oplog.rs'].find(query,cursor_type=CursorType.TAILABLE)
         if 'ts' in query:
             oplog.add_option(8)     # oplogReplay
         sleep_cycles = 0
@@ -305,7 +307,23 @@ class App():
 
 
 def get_mongo_connection(uri):
+    #parsed_cs = deal_with_mongo_connection_string(uri)
+    #if ( parsed_cs.password ):
+    #    p = url.split('@')
+    #    pp = "mongodb://"+url[1]
+    #    return pymongo.MongoClient(pp,username=parsed_cs['username'],password=parsedd_cs['password'])
+    #else:
     return pymongo.MongoClient(uri)
+
+# deal with special characters in password
+def deal_with_mongo_connection_string(uri):
+    print uri
+
+    parsed_cs = pymongo.uri_parser.parse_uri(uri)
+    print str(parsed_cs)
+    parsed_cs['password'] = urllib.quote_plus( parsed_cs['password'] )
+    return parsed_cs
+
 
 
 
