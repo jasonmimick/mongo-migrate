@@ -228,11 +228,13 @@ class App():
             options.pop('safe',None)
             if not 'background' in options:
                 options['background']=True
-            r = c.create_index( pyindex,
+            try:
+                r = c.create_index( pyindex,
                                 name=index['name'],
                                 **options)
-            self.logger.info('create_index on %s.%s result:%s' % (db,collection,str(r)))
-
+                self.logger.info('create_index on %s.%s result:%s' % (db,collection,str(r)))
+            except OperationFailure as op_fail:
+                self.logger.error('create_index on %s.%s ERROR: %s' % (db,collection,str(op_fail)))
 
 
     def get_last_source_oplog_entry(self):
