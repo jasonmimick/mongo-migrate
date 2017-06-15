@@ -147,17 +147,14 @@ class App():
                     [t.start() for t in threads]
 
                     while True:
-                        threads = [t.join(5) for t in threads if t is not None and t.isAlive()]
-                        ii = 0
+                        threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
                         for t in threads:
                             if t is None or not t.isAlive:
                                 coll_count +=1
-                            self.logger.debug('* %d *********** %s' % (ii,str(t)))
-                            ii+=1
-                        self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
-                        self.logger.info("Status %d out of %d collections for db=%s complete" % (coll_count,number_source_colls,database['name']))
                     threads = []
 
+                self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
+                self.logger.info("Status %d out of %d collections for db=%s complete" % (coll_count,number_source_colls,database['name']))
 
             self.logger.debug('len(threads)=%i'%len(threads))
             if len(threads)>0:
@@ -166,13 +163,9 @@ class App():
                 wait=True
                 while wait:
                     threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
-                    ii = 0
                     for t in threads:
                         if t is None or not t.isAlive:
                             coll_count +=1
-                        self.logger.debug('*  %d  *********** %s' % (ii,str(t)))
-                        ii+=1
-                    self.logger.debug('treads: %s' % str(threads))
                     if len(threads)==0:
                         wait=False
             db_count +=1
