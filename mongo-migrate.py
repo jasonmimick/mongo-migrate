@@ -225,6 +225,7 @@ class App():
             options.pop('name',None)
             options.pop('v',None)
             options.pop('ns',None)
+            options.pop('safe',None)
             if not 'background' in options:
                 options['background']=True
             r = c.create_index( pyindex,
