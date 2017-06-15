@@ -225,9 +225,10 @@ class App():
             options.pop('name',None)
             options.pop('v',None)
             options.pop('ns',None)
+            if not 'background' in options:
+                options['background']=True
             r = c.create_index( pyindex,
                                 name=index['name'],
-                                background=True,
                                 **options)
             self.logger.info('create_index on %s.%s result:%s' % (db,collection,str(r)))
 
