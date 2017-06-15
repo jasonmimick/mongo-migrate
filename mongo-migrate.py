@@ -233,7 +233,7 @@ class App():
                                 name=index['name'],
                                 **options)
                 self.logger.info('create_index on %s.%s result:%s' % (db,collection,str(r)))
-            except OperationFailure as op_fail:
+            except pymongo.errors.OperationFailure as op_fail:
                 self.logger.error('create_index on %s.%s ERROR: %s' % (db,collection,str(op_fail)))
 
 
