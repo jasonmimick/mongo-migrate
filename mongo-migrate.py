@@ -12,7 +12,6 @@
 import datetime
 import pymongo
 import time
-import yaml
 import logging
 import sys, os
 import argparse
@@ -313,7 +312,7 @@ def get_mongo_connection(uri):
 def main():
 
     # parse arguments
-    description = u'mongo-migrate - replica et synchonization tool'
+    description = u'mongo-migrate - replica set synchonization tool'
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--source",required=True,help='mongodb uri for source replica set')
     parser.add_argument("--destination",required=True,help='mongodb uri for destination replica set')
