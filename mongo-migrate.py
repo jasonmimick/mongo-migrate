@@ -20,7 +20,7 @@ import argparse
 from threading import Thread
 import traceback
 import multiprocessing
-
+#from memory_profiler import profile
 
 class OplogConsumer(multiprocessing.Process):
 
@@ -31,9 +31,10 @@ class OplogConsumer(multiprocessing.Process):
         self.args = args
         self.logger = logger
         self.destination = args.destination
-        self.dest_mongo = get_mongo_connection( self.destination )
+        #self.dest_mongo = get_mongo_connection( self.destination )
         self.daemon = True
 
+    #@profile
     def run(self):
         self.logger.info("Oplog Consumer run()")
         proc_name = self.name
@@ -78,13 +79,6 @@ class App():
         self.stop_requested = False
         self.oplog_tasks = multiprocessing.JoinableQueue()
         self.oplog_tasks_results = multiprocessing.Queue()
-        # start oplog_tasks_results monitor
-        self.oplog_tasks_results_monitor =Thread(target=self.monitor_oplog_tasks_results, args=(self.oplog_tasks_results,logger))
-        self.oplog_tasks_results_monitor.setDaemon(True)
-        self.oplog_tasks_results_monitor.start()
-
-        self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results)
-        self.oplog_consumer.start()
 
     def monitor_oplog_tasks_results(self, queue, logger):
         logger.info("Oplog tasks results monitor started")
@@ -92,6 +86,7 @@ class App():
             result = queue.get()
             logger.debug(result)
 
+    #@profile
     def initial_sync(self):
         self.logger.info("initial sync starting")
         source_mongo = get_mongo_connection(self.source)
@@ -137,7 +132,8 @@ class App():
                     self.logger.info('Skipping %s.%s on source' % (database['name'],coll))
                     continue
                 self.logger.debug('>>>>>>>>> coll=%s'%coll)
-                t = Thread(target=self.dump_and_restore_collection, args=(database['name'],coll))
+                #t = Thread(target=self.dump_and_restore_collection, args=(database['name'],coll))
+                t = Thread(target=self.dump_and_restore_collection, args=(database['name'],coll,source_mongo,dest_mongo))
                 t.setDaemon(True)
                 threads.append(t)
 
@@ -175,10 +171,12 @@ class App():
         return self.initial_sync_status['last_source_oplog_entry']
 
 
-    def dump_and_restore_collection(self,db,collection):
+    #@profile
+    #def dump_and_restore_collection(self,db,collection):
+    def dump_and_restore_collection(self,db,collection,source_mongo,dest_mongo):
         self.logger.info('dump_and_restore %s.%s' % (db,collection))
-        source_mongo = get_mongo_connection(self.source)
-        dest_mongo = get_mongo_connection(self.destination)
+        #source_mongo = get_mongo_connection(self.source)
+        #dest_mongo = get_mongo_connection(self.destination)
         if self.args.dropOnDestination:
             self.logger.debug('dropping %s.%s on destination' % (db,collection))
             result = dest_mongo[db][collection].drop()
@@ -194,6 +192,7 @@ class App():
         bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
         batch_size = self.args.initialSyncBatchSize
         source_cursor = source_mongo[db][collection].find({},modifiers={"$snapshot":True})
+        source_cursor.batch_size(batch_size)
         while ( source_cursor.alive ):
             try:
                 doc = source_cursor.next()
@@ -254,18 +253,40 @@ class App():
                 self.logger.info('create_index on %s.%s result:%s' % (db,collection,str(r)))
             except pymongo.errors.OperationFailure as op_fail:
                 self.logger.error('create_index on %s.%s ERROR: %s' % (db,collection,str(op_fail)))
+        try:
+            self.logger.info("initial sync %s.%s: attempt to free resources"
+                             % (db,collection))
+            source_cursor.close()
+            #source_mongo.close()
+            #dest_mongo.close()
+            self.logger.info("initial sync %s.%s: resources free" % (db,collection))
+        except Exception as exp:
+            self.logger.error("Exception attempting to free resources")
+            self.logger.error("%s" % exp)
 
 
     def get_last_source_oplog_entry(self):
         self.logger.debug('starting to fetch last oplog entry on source')
         source_mongo = get_mongo_connection(self.source)
-        last_oplog_entry = source_mongo['local']['oplog.rs'].find({}).sort("ts",-1).limit(1).next()
+        last_oplog_entry_cursor = source_mongo['local']['oplog.rs'].find({}).sort("ts",-1).limit(1)
+        last_oplog_entry = last_oplog_entry_cursor.next()
         self.logger.debug('last oplog entry %s' % last_oplog_entry)
+        last_oplog_entry_cursor.close()
+        source_mongo.close()
         return last_oplog_entry
 
 
     def tail_oplog(self,start_ts=0):
         self.logger.info('tail_oplog')
+
+        # start oplog_tasks_results monitor
+        self.oplog_tasks_results_monitor =Thread(target=self.monitor_oplog_tasks_results,
+                                                 args=(self.oplog_tasks_results,self.logger))
+        self.oplog_tasks_results_monitor.setDaemon(True)
+        self.oplog_tasks_results_monitor.start()
+        self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results)
+        self.oplog_consumer.start()
+
         source_mongo = get_mongo_connection(self.source)
         dest_mongo = get_mongo_connection(self.destination)
         query = {}
@@ -329,6 +350,8 @@ class App():
                                  % (db,coll,source_count,dest_count,ok))
                 if not (source_count==dest_count):
                     self.logger.error('%s.%s counts did not match!' % (db,coll))
+        source_mongo.close()
+        dest_mongo.close()
 
 
 def get_mongo_connection(uri):
@@ -387,7 +410,6 @@ def main():
     try:
         logger.info('running...')
         if app.args.oplogOnly:
-            #app.tail_oplog(app.get_last_source_oplog_entry()['ts'])
             app.tail_oplog(0)
         else:
             last_op_ts = app.initial_sync()
