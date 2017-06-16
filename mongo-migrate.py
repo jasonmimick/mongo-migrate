@@ -145,12 +145,12 @@ class App():
                 if len(threads)==numParallelWorkers:
                     self.logger.debug('starting batch')
                     [t.start() for t in threads]
-
-                    while True:
+                    wait=True
+                    while wait:
                         threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
-                        for t in threads:
-                            if t is None or not t.isAlive:
-                                coll_count +=1
+                        if len(threads)==0:
+                            coll_count += numParallelWorkers;
+                            wait=False
                     threads = []
 
                 self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
@@ -158,15 +158,14 @@ class App():
 
             self.logger.debug('len(threads)=%i'%len(threads))
             if len(threads)>0:
-                self.logger.debug('starting final batch')
+                lastBatchWorkers = len(threads)
+                self.logger.debug('starting final batch of %i workers' % lastBatchWorkers)
                 [t.start() for t in threads]
                 wait=True
                 while wait:
                     threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
-                    for t in threads:
-                        if t is None or not t.isAlive:
-                            coll_count +=1
                     if len(threads)==0:
+                        coll_count += lastBatchWorkers;
                         wait=False
             db_count +=1
             self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
