@@ -188,7 +188,7 @@ class App():
         dest_mongo[db].create_collection(collection)
 
         source_count = source_mongo[db][collection].count()
-        self.logger.info('source_count=%s' % str(source_count))
+        self.logger.info('%s.%s source_count=%s' % (db,collection,str(source_count)))
 
         doc_count = 0
         bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
@@ -206,7 +206,7 @@ class App():
                 doc_count += 1
                 if (doc_count == batch_size ):
                     r = bulk.execute()
-                    self.logger.debug(r)
+                    self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
                     doc_count=0
                     bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
             except StopIteration:   #thrown when out of data so wait a little
@@ -219,10 +219,10 @@ class App():
         # check if any more docs to send
         if doc_count>0:
             r = bulk.execute()
-            self.logger.debug(r)
+            self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
 
         dest_count = dest_mongo[db][collection].count()
-        self.logger.info('dest_count=%s' % str(dest_count))
+        self.logger.info('%s.%s dest_count=%s' % (db,collection,str(dest_count)))
         # create indexes
         index_query = { "ns" : "%s.%s" % (db,collection) }
         indexes_cursor = source_mongo[db]['system.indexes'].find(index_query)
@@ -257,6 +257,7 @@ class App():
 
 
     def get_last_source_oplog_entry(self):
+        self.logger.debug('starting to fetch last oplog entry on source')
         source_mongo = get_mongo_connection(self.source)
         last_oplog_entry = source_mongo['local']['oplog.rs'].find({}).sort("ts",-1).limit(1).next()
         self.logger.debug('last oplog entry %s' % last_oplog_entry)
