@@ -214,7 +214,7 @@ class App():
                 if doc_count>0:
                     r = bulk.execute()
                     doc_count=0
-                    self.logger.debug(r)
+                    self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
 
         # check if any more docs to send
         if doc_count>0:
