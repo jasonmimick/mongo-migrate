@@ -31,7 +31,7 @@ class OplogConsumer(multiprocessing.Process):
         self.args = args
         self.logger = logger
         self.destination = args.destination
-        #self.dest_mongo = get_mongo_connection( self.destination )
+        self.dest_mongo = get_mongo_connection( self.destination )
         self.daemon = True
 
     #@profile
