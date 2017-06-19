@@ -79,12 +79,26 @@ class App():
         self.stop_requested = False
         self.oplog_tasks = multiprocessing.JoinableQueue()
         self.oplog_tasks_results = multiprocessing.Queue()
+        # remove any empty string
+        self.nsToMigrate = filter(None,self.args.nsToMigrate.split(','))
 
     def monitor_oplog_tasks_results(self, queue, logger):
         logger.info("Oplog tasks results monitor started")
         while True:
             result = queue.get()
             logger.debug(result)
+
+    def should_migrate_ns(self,db,coll):
+        self.logger.debug("self.nsToMigrate = %s" % self.nsToMigrate)
+        if len(self.nsToMigrate)==0:
+            return True
+        ns = "%s.%s" % (db,coll)
+        should_migrate = False
+        if ns in self.nsToMigrate:
+            should_migrate = True
+        self.logger.debug("should_migrate_ns checking %s.%s nsToMigrate=%s return %s"
+                          % (db,coll,str(self.nsToMigrate),str(should_migrate)))
+        return should_migrate
 
     #@profile
     def initial_sync(self):
@@ -130,6 +144,8 @@ class App():
             for coll in source_colls:
                 if coll in colls_to_skip:
                     self.logger.info('Skipping %s.%s on source' % (database['name'],coll))
+                    continue
+                if not self.should_migrate_ns(database['name'],coll):
                     continue
                 self.logger.debug('>>>>>>>>> coll=%s'%coll)
                 #t = Thread(target=self.dump_and_restore_collection, args=(database['name'],coll))
@@ -204,25 +220,39 @@ class App():
                     continue
                 doc_count += 1
                 if (doc_count == batch_size ):
-                    r = bulk.execute()
-                    self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
+                    try:
+                        r = bulk.execute()
+                        self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
+                    except BulkWriteError as bwe:
+                        self.logger.error("bulk write error on %s.%x" % (db,collection))
+                        self.logger.error(str(bwe))
                     doc_count=0
                     bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
             except StopIteration:   #thrown when out of data so wait a little
                 self.logger.info('%s.%s source intial sync cursor complete' % (db,collection))
                 if doc_count>0:
-                    r = bulk.execute()
-                    doc_count=0
+                    try:
+                        r = bulk.execute()
+                        self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
+                    except BulkWriteError as bwe:
+                        self.logger.error("bulk write error on %s.%x" % (db,collection))
+                        self.logger.error(str(bwe))
                     self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
 
         # check if any more docs to send
+        self.logger.info('sending last batch of doc_count=%i' % doc_count)
         if doc_count>0:
-            r = bulk.execute()
-            self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
+            try:
+                r = bulk.execute()
+                self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
+            except BulkWriteError as bwe:
+                self.logger.error("bulk write error on %s.%x" % (db,collection))
+                self.logger.error(str(bwe))
 
         dest_count = dest_mongo[db][collection].count()
         self.logger.info('%s.%s dest_count=%s' % (db,collection,str(dest_count)))
         # create indexes
+        self.logger.info('starting index migration for %s.%s' % (db,collection))
         index_query = { "ns" : "%s.%s" % (db,collection) }
         indexes_cursor = source_mongo[db]['system.indexes'].find(index_query)
         while ( indexes_cursor.alive ):
@@ -298,8 +328,9 @@ class App():
                 self.logger.info("local.oplog.rs"+' exists, but no entries found')
         else:
             query['ts']={ "$gt" : start_ts }
-
-        self.logger.debug('tail_oplog starting ts=%s' % str(query['ts']))
+        if not len(self.nsToMigrate)==0:
+            query['ns'] = { '$in' : self.nsToMigrate }
+        self.logger.info('tail_oplog starting query=%s' % str(query))
         #start tailable cursor
         oplog = source_mongo['local']['oplog.rs'].find(query,cursor_type=CursorType.TAILABLE)
         if 'ts' in query:
@@ -340,6 +371,8 @@ class App():
             source_colls = source_mongo[db].collection_names()
             for coll in source_colls:
                 if coll in colls_to_skip:
+                    continue
+                if not self.should_migrate_ns(db,coll):
                     continue
                 source_count = source_mongo[db][coll].count()
                 dest_count = dest_mongo[db][coll].count()
@@ -385,6 +418,7 @@ def main():
     parser.add_argument("--oplogOnly",action='store_true',default=False,help='only stream oplog from source to destination')
     parser.add_argument("--initialSyncOnly",action='store_true',default=False,help='only all data from source to destination, do not append oplog entries')
     parser.add_argument("--dropOnDestination",action='store_true',default=False,help='drop collections on destination, default False')
+    parser.add_argument("--nsToMigrate",default='',help='comma delimited list of namespaces to sync, other namespaces are ignored')
     parser.add_argument("--loglevel",default='info',help='loglevel debug,info default=info')
     parser.add_argument("--logfile",default='--',help='logfile full path or -- for stdout')
     parser.add_argument("--numInsertionWorkers",type=int,default=5,help='number of threads run parallel initial sync for collections, default 5')
