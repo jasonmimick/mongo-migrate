@@ -16,25 +16,27 @@ from pymongo.cursor import CursorType
 import time
 import logging
 import sys, os
+import hashlib
 import argparse
 from threading import Thread
 import traceback
 import multiprocessing
-#from memory_profiler import profile
+import pickle
+
+OPLOG_TOMBSTONE_FILE = "mongo-migrate-tombstone"
 
 class OplogConsumer(multiprocessing.Process):
 
-    def __init__(self, args, logger, task_queue, result_queue):
+    def __init__(self, args, logger, task_queue, result_queue, dest_mongo):
         multiprocessing.Process.__init__(self)
         self.task_queue = task_queue
         self.result_queue = result_queue
         self.args = args
         self.logger = logger
         self.destination = args.destination
-        self.dest_mongo = get_mongo_connection( self.destination )
+        self.dest_mongo = dest_mongo
         self.daemon = True
 
-    #@profile
     def run(self):
         self.logger.info("Oplog Consumer run()")
         proc_name = self.name
@@ -62,6 +64,12 @@ class OplogConsumer(multiprocessing.Process):
     def process_op(self,op):
         try:
             r = self.dest_mongo['admin'].command('applyOps',[op])
+            tombstone = { "last_op" : op,
+                          "when" : datetime.datetime.now(),
+                          "nsToMigrate" : self.args.nsToMigrate,
+                          "v" : tool_version() }
+            self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
+            pickle.dump(tombstone, open(OPLOG_TOMBSTONE_FILE, "wb" ))
             return r
         except Exception as exp:
             self.logger.error(exp)
@@ -81,12 +89,34 @@ class App():
         self.oplog_tasks_results = multiprocessing.Queue()
         # remove any empty string
         self.nsToMigrate = filter(None,self.args.nsToMigrate.split(','))
+        self.source_mongo = get_mongo_connection(self.source)
+        self.dest_mongo = get_mongo_connection(self.destination)
 
     def monitor_oplog_tasks_results(self, queue, logger):
         logger.info("Oplog tasks results monitor started")
         while True:
             result = queue.get()
             logger.debug(result)
+
+    def check_oplog_tombstone(self):
+        ts=0
+        if os.path.exists(OPLOG_TOMBSTONE_FILE):
+            try:
+                tombstone = pickle.load( open( OPLOG_TOMBSTONE_FILE, "rb") )
+                self.logger.info("Found and loaded tombstone=%s" % str(tombstone))
+                if tombstone['v'] == tool_version():
+                    ts=tombstone['last_op']['ts']
+                elif self.args.skipTombstoneVersionCheck:
+                    self.logger.warn("Expected tool version %s but found %s, but allowed since --skipTombstoneVersionCheck was True" % (tool_version(), tombstone['v']))
+                    ts=tombstone['last_op']['ts']
+                else:
+                    self.logger.error("Found tombstone, but versions do not match. Expected %s but found %s" % (tool_version(), tombstone['v']))
+                    self.logger.error("Check version of mongo-migrate or remove file '%s'" % OPLOG_TOMBSTONE_FILE)
+                    raise Exception("Tool version in tombstone was not correct")
+            except Exception as exp:
+                self.logger.error(exp)
+                raise exp
+        return ts
 
     def should_migrate_ns(self,db,coll):
         self.logger.debug("self.nsToMigrate = %s" % self.nsToMigrate)
@@ -100,11 +130,8 @@ class App():
                           % (db,coll,str(self.nsToMigrate),str(should_migrate)))
         return should_migrate
 
-    #@profile
     def initial_sync(self):
         self.logger.info("initial sync starting")
-        source_mongo = get_mongo_connection(self.source)
-        dest_mongo = get_mongo_connection(self.destination)
 
         # fetch and record source last oplog entry
         self.initial_sync_status = {}
@@ -112,10 +139,10 @@ class App():
         self.initial_sync_status['last_source_oplog_entry'] = last_oplog_doc['ts']
 
         # get list of namespaces to sync
-        source_dbs = source_mongo['admin'].command('listDatabases')
+        source_dbs = self.source_mongo['admin'].command('listDatabases')
         self.logger.debug('source databases: %s' % str(source_dbs))
         # get list of destination namespaces
-        dest_dbs = dest_mongo['admin'].command('listDatabases')
+        dest_dbs = self.dest_mongo['admin'].command('listDatabases')
         self.logger.debug('destination databases: %s' % str(dest_dbs))
         # check for overlapping collections
         self.logger.info("TODO: check for overlapping collections")
@@ -137,7 +164,7 @@ class App():
                 self.logger.info('Skipping %s on source' % database['name'])
                 continue
 
-            source_colls = source_mongo[database['name']].collection_names()
+            source_colls = self.source_mongo[database['name']].collection_names()
             number_source_colls = len(source_colls) - len(colls_to_skip)
             coll_count = 0
             self.logger.debug('source collections = %s' % str(source_colls))
@@ -148,8 +175,7 @@ class App():
                 if not self.should_migrate_ns(database['name'],coll):
                     continue
                 self.logger.debug('>>>>>>>>> coll=%s'%coll)
-                #t = Thread(target=self.dump_and_restore_collection, args=(database['name'],coll))
-                t = Thread(target=self.dump_and_restore_collection, args=(database['name'],coll,source_mongo,dest_mongo))
+                t = Thread(target=self.dump_and_restore_collection, args=(database['name'],coll,self.source_mongo,self.dest_mongo))
                 t.setDaemon(True)
                 threads.append(t)
 
@@ -187,12 +213,8 @@ class App():
         return self.initial_sync_status['last_source_oplog_entry']
 
 
-    #@profile
-    #def dump_and_restore_collection(self,db,collection):
     def dump_and_restore_collection(self,db,collection,source_mongo,dest_mongo):
         self.logger.info('dump_and_restore %s.%s' % (db,collection))
-        #source_mongo = get_mongo_connection(self.source)
-        #dest_mongo = get_mongo_connection(self.destination)
         if self.args.dropOnDestination:
             self.logger.debug('dropping %s.%s on destination' % (db,collection))
             result = dest_mongo[db][collection].drop()
@@ -227,7 +249,7 @@ class App():
                         self.logger.error("bulk write error on %s.%x" % (db,collection))
                         self.logger.error(str(bwe))
                     doc_count=0
-                    bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
+                    bulk = self.dest_mongo[db][collection].initialize_unordered_bulk_op()
             except StopIteration:   #thrown when out of data so wait a little
                 self.logger.info('%s.%s source intial sync cursor complete' % (db,collection))
                 if doc_count>0:
@@ -249,7 +271,7 @@ class App():
                 self.logger.error("bulk write error on %s.%x" % (db,collection))
                 self.logger.error(str(bwe))
 
-        dest_count = dest_mongo[db][collection].count()
+        dest_count = self.dest_mongo[db][collection].count()
         self.logger.info('%s.%s dest_count=%s' % (db,collection,str(dest_count)))
         # create indexes
         self.logger.info('starting index migration for %s.%s' % (db,collection))
@@ -268,7 +290,7 @@ class App():
                   pi = (key,pymongo.DESCENDING)
                pyindex.append(pi)
             self.logger.debug(pyindex)
-            c = dest_mongo[db][collection]
+            c = self.dest_mongo[db][collection]
             options = dict(index)
             options.pop('name',None)
             options.pop('v',None)
@@ -287,8 +309,6 @@ class App():
             self.logger.info("initial sync %s.%s: attempt to free resources"
                              % (db,collection))
             source_cursor.close()
-            #source_mongo.close()
-            #dest_mongo.close()
             self.logger.info("initial sync %s.%s: resources free" % (db,collection))
         except Exception as exp:
             self.logger.error("Exception attempting to free resources")
@@ -297,12 +317,11 @@ class App():
 
     def get_last_source_oplog_entry(self):
         self.logger.debug('starting to fetch last oplog entry on source')
-        source_mongo = get_mongo_connection(self.source)
-        last_oplog_entry_cursor = source_mongo['local']['oplog.rs'].find({}).sort("ts",-1).limit(1)
+        self.source_mongo = get_mongo_connection(self.source)
+        last_oplog_entry_cursor = self.source_mongo['local']['oplog.rs'].find({}).sort("ts",-1).limit(1)
         last_oplog_entry = last_oplog_entry_cursor.next()
         self.logger.debug('last oplog entry %s' % last_oplog_entry)
         last_oplog_entry_cursor.close()
-        source_mongo.close()
         return last_oplog_entry
 
 
@@ -314,13 +333,12 @@ class App():
                                                  args=(self.oplog_tasks_results,self.logger))
         self.oplog_tasks_results_monitor.setDaemon(True)
         self.oplog_tasks_results_monitor.start()
-        self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results)
+        self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results,self.dest_mongo)
         self.oplog_consumer.start()
 
-        source_mongo = get_mongo_connection(self.source)
-        dest_mongo = get_mongo_connection(self.destination)
+
         query = {}
-        if ( start_ts==0 ):
+        if (start_ts==0):
             try:
                 last_oplog_entry = self.get_last_source_oplog_entry()
                 query["ts"]={ "$gt" : last_oplog_entry['ts'] }
@@ -332,7 +350,7 @@ class App():
             query['ns'] = { '$in' : self.nsToMigrate }
         self.logger.info('tail_oplog starting query=%s' % str(query))
         #start tailable cursor
-        oplog = source_mongo['local']['oplog.rs'].find(query,cursor_type=CursorType.TAILABLE)
+        oplog = self.source_mongo['local']['oplog.rs'].find(query,cursor_type=CursorType.TAILABLE)
         if 'ts' in query:
             oplog.add_option(8)     # oplogReplay
         sleep_cycles = 0
@@ -358,24 +376,22 @@ class App():
 
     def run_collection_checks(self):
         self.logger.info('Running collection checks')
-        source_mongo = get_mongo_connection(self.source)
-        dest_mongo = get_mongo_connection(self.destination)
-        source_dbs = source_mongo['admin'].command('listDatabases')
-        dest_dbs = dest_mongo['admin'].command('listDatabases')
+        source_dbs = self.source_mongo['admin'].command('listDatabases')
+        dest_dbs = self.dest_mongo['admin'].command('listDatabases')
         dbs_to_skip = [ 'admin', 'local']
         colls_to_skip = [ 'system.indexes' ]
         for database in source_dbs['databases']:
             db = database['name']
             if db in dbs_to_skip:
                 continue
-            source_colls = source_mongo[db].collection_names()
+            source_colls = self.source_mongo[db].collection_names()
             for coll in source_colls:
                 if coll in colls_to_skip:
                     continue
                 if not self.should_migrate_ns(db,coll):
                     continue
-                source_count = source_mongo[db][coll].count()
-                dest_count = dest_mongo[db][coll].count()
+                source_count = self.source_mongo[db][coll].count()
+                dest_count = self.dest_mongo[db][coll].count()
                 ok = ''
                 if (source_count==dest_count):
                     ok = 'Looks good!'
@@ -383,8 +399,6 @@ class App():
                                  % (db,coll,source_count,dest_count,ok))
                 if not (source_count==dest_count):
                     self.logger.error('%s.%s counts did not match!' % (db,coll))
-        source_mongo.close()
-        dest_mongo.close()
 
 
 def get_mongo_connection(uri):
@@ -394,7 +408,7 @@ def get_mongo_connection(uri):
     #    pp = "mongodb://"+url[1]
     #    return pymongo.MongoClient(pp,username=parsed_cs['username'],password=parsedd_cs['password'])
     #else:
-    return pymongo.MongoClient(uri)
+    return pymongo.MongoClient(uri,connect=False)
 
 # deal with special characters in password
 def deal_with_mongo_connection_string(uri):
@@ -406,6 +420,11 @@ def deal_with_mongo_connection_string(uri):
     return parsed_cs
 
 
+filehash = hashlib.md5()
+filehash.update(open(__file__).read())
+__tool_version__ = filehash.hexdigest()
+def tool_version():
+    return __tool_version__
 
 
 def main():
@@ -413,9 +432,11 @@ def main():
     # parse arguments
     description = u'mongo-migrate - replica set synchonization tool'
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--source",required=True,help='mongodb uri for source replica set')
-    parser.add_argument("--destination",required=True,help='mongodb uri for destination replica set')
+    parser.add_argument("--version",action='store_true',default=False,help='print version and exit')
+    parser.add_argument("--source",help='mongodb uri for source replica set')
+    parser.add_argument("--destination",help='mongodb uri for destination replica set')
     parser.add_argument("--oplogOnly",action='store_true',default=False,help='only stream oplog from source to destination')
+    parser.add_argument("--skipTombstoneVersionCheck",action='store_true',default=False,help='allow tombstone file from another version of mongo-migrate.py, may fail if tombstone format changes')
     parser.add_argument("--initialSyncOnly",action='store_true',default=False,help='only all data from source to destination, do not append oplog entries')
     parser.add_argument("--dropOnDestination",action='store_true',default=False,help='drop collections on destination, default False')
     parser.add_argument("--nsToMigrate",default='',help='comma delimited list of namespaces to sync, other namespaces are ignored')
@@ -437,14 +458,25 @@ def main():
     logger.addHandler(handler)
     logger.info(description)
     logger.info('mongrate startup')
+    logger.info('version: %s' % tool_version())
     logger.debug("args: " + str(args))
     logger.info("log level set to " + logging.getLevelName(logger.getEffectiveLevel()))
+    if (args.version):
+        os._exit(0)
+    if not args.source:
+        logger.error("mongo-migrate.py: error: argument --source is required")
+        os._exit(1)
+    if not args.destination:
+        logger.error("mongo-migrate.py: error: argument --destination is required")
+        os._exit(1)
+
     app = App(args, logger)
     logger.info('mongo-migrate initialized')
     try:
         logger.info('running...')
         if app.args.oplogOnly:
-            app.tail_oplog(0)
+            ts = app.check_oplog_tombstone()
+            app.tail_oplog(ts)
         else:
             last_op_ts = app.initial_sync()
             logger.info('initial sync complete, starting oplog tailing ts=%s' % last_op_ts)
