@@ -12,12 +12,14 @@
 import datetime
 import urllib
 import pymongo
+from pymongo.errors import BulkWriteError
 from pymongo.cursor import CursorType
 import time
 import logging
 import sys, os
 import hashlib
 import argparse
+import threading
 from threading import Thread
 import traceback
 import multiprocessing
@@ -165,7 +167,10 @@ class App():
                 continue
 
             source_colls = self.source_mongo[database['name']].collection_names()
-            number_source_colls = len(source_colls) - len(colls_to_skip)
+            if len(source_colls)>0:
+                number_source_colls = len(source_colls) - len(colls_to_skip)
+            else:
+                number_source_colls = 0
             coll_count = 0
             self.logger.debug('source collections = %s' % str(source_colls))
             for coll in source_colls:
@@ -179,16 +184,18 @@ class App():
                 t.setDaemon(True)
                 threads.append(t)
 
-                self.logger.debug('len(threads)=%i'%len(threads))
+                self.logger.debug('len(threads)=%i threads=%s'%(len(threads),threads))
                 if len(threads)==numParallelWorkers:
                     self.logger.debug('starting batch')
-                    [t.start() for t in threads]
+                    for t in threads:
+                        t.start()
                     wait=True
-                    while wait:
-                        threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
-                        if len(threads)==0:
-                            coll_count += numParallelWorkers;
-                            wait=False
+                    for t in threads:
+                        t.join()
+                    self.logger.debug('DONE >>> len(threads)=%i'%len(threads))
+                    self.logger.debug("threads=%s" % threads)
+                    coll_count += numParallelWorkers;
+                    wait=False
                     threads = []
 
                 self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
@@ -198,13 +205,13 @@ class App():
             if len(threads)>0:
                 lastBatchWorkers = len(threads)
                 self.logger.debug('starting final batch of %i workers' % lastBatchWorkers)
-                [t.start() for t in threads]
-                wait=True
-                while wait:
-                    threads = [t.join(20) for t in threads if t is not None and t.isAlive()]
-                    if len(threads)==0:
-                        coll_count += lastBatchWorkers;
-                        wait=False
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                self.logger.debug("last batch len(threads)=%i complete" % len(threads))
+                coll_count += lastBatchWorkers;
+                threads=[]
             db_count +=1
             self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
             self.logger.info("Status %d out of %d collections for db=%s complete" % (coll_count,number_source_colls,database['name']))
@@ -215,16 +222,19 @@ class App():
 
     def dump_and_restore_collection(self,db,collection,source_mongo,dest_mongo):
         self.logger.info('dump_and_restore %s.%s' % (db,collection))
+        source_count = source_mongo[db][collection].count()
+        self.logger.info('%s.%s source_count=%s' % (db,collection,str(source_count)))
+        if (source_count==0) and not self.args.migrateEmptyCollections:
+            self.logger.info("Skipping %s.%s since --migrateEmptyCollection was False" % (db,collection))
+            return
+
         if self.args.dropOnDestination:
             self.logger.debug('dropping %s.%s on destination' % (db,collection))
             result = dest_mongo[db][collection].drop()
-            self.logger.debug('drop result: %s' %str(result))
+            self.logger.debug('drop on %s.%s result: %s' %(db,collection,str(result)))
         # create identical collection on destination
         # TODO: support collection options()
         dest_mongo[db].create_collection(collection)
-
-        source_count = source_mongo[db][collection].count()
-        self.logger.info('%s.%s source_count=%s' % (db,collection,str(source_count)))
 
         doc_count = 0
         bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
@@ -243,22 +253,24 @@ class App():
                 doc_count += 1
                 if (doc_count == batch_size ):
                     try:
-                        r = bulk.execute()
+                        r = bulk.execute({ 'w' : 'majority' })
                         self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
                     except BulkWriteError as bwe:
                         self.logger.error("bulk write error on %s.%x" % (db,collection))
                         self.logger.error(str(bwe))
+                        self.logger.error("BulkWriteError.details=%s" % bwe.details)
                     doc_count=0
                     bulk = self.dest_mongo[db][collection].initialize_unordered_bulk_op()
-            except StopIteration:   #thrown when out of data so wait a little
+            except StopIteration:
                 self.logger.info('%s.%s source intial sync cursor complete' % (db,collection))
                 if doc_count>0:
                     try:
-                        r = bulk.execute()
+                        r = bulk.execute({ 'w' : 'majority' })
                         self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
                     except BulkWriteError as bwe:
                         self.logger.error("bulk write error on %s.%x" % (db,collection))
                         self.logger.error(str(bwe))
+                        self.logger.error("BulkWriteError.details=%s" % bwe.details)
                     self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
 
         # check if any more docs to send
@@ -395,10 +407,11 @@ class App():
                 ok = ''
                 if (source_count==dest_count):
                     ok = 'Looks good!'
+                else:
+                    ok = "ERROR!"
+                    self.logger.error('%s.%s counts did not match!' % (db,coll))
                 self.logger.info('%s.%s.count() source=%i, destination=%i %s'
                                  % (db,coll,source_count,dest_count,ok))
-                if not (source_count==dest_count):
-                    self.logger.error('%s.%s counts did not match!' % (db,coll))
 
 
 def get_mongo_connection(uri):
@@ -408,7 +421,7 @@ def get_mongo_connection(uri):
     #    pp = "mongodb://"+url[1]
     #    return pymongo.MongoClient(pp,username=parsed_cs['username'],password=parsedd_cs['password'])
     #else:
-    return pymongo.MongoClient(uri,connect=False)
+    return pymongo.MongoClient(uri,connect=False,w="majority")
 
 # deal with special characters in password
 def deal_with_mongo_connection_string(uri):
@@ -439,6 +452,7 @@ def main():
     parser.add_argument("--skipTombstoneVersionCheck",action='store_true',default=False,help='allow tombstone file from another version of mongo-migrate.py, may fail if tombstone format changes')
     parser.add_argument("--initialSyncOnly",action='store_true',default=False,help='only all data from source to destination, do not append oplog entries')
     parser.add_argument("--dropOnDestination",action='store_true',default=False,help='drop collections on destination, default False')
+    parser.add_argument("--migrateEmptyCollections",action='store_true',default=False,help='set to migrate empty collections, default False')
     parser.add_argument("--nsToMigrate",default='',help='comma delimited list of namespaces to sync, other namespaces are ignored')
     parser.add_argument("--loglevel",default='info',help='loglevel debug,info default=info')
     parser.add_argument("--logfile",default='--',help='logfile full path or -- for stdout')
@@ -449,7 +463,7 @@ def main():
     args = parser.parse_args()
     logger = logging.getLogger("mongo-migrate")
     logger.setLevel(getattr(logging,args.loglevel.upper()))
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(threadName)s - %(message)s")
     if args.logfile == '--':
         handler = logging.StreamHandler(sys.stdout)
     else:
