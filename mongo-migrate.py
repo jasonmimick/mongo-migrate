@@ -167,9 +167,8 @@ class App():
                 continue
 
             source_colls = self.source_mongo[database['name']].collection_names()
-            if len(source_colls)>0:
-                number_source_colls = len(source_colls) - len(colls_to_skip)
-            else:
+            number_source_colls = len(source_colls) - len(colls_to_skip)
+            if number_source_colls<0:
                 number_source_colls = 0
             coll_count = 0
             self.logger.debug('source collections = %s' % str(source_colls))
@@ -189,13 +188,11 @@ class App():
                     self.logger.debug('starting batch')
                     for t in threads:
                         t.start()
-                    wait=True
                     for t in threads:
                         t.join()
                     self.logger.debug('DONE >>> len(threads)=%i'%len(threads))
                     self.logger.debug("threads=%s" % threads)
                     coll_count += numParallelWorkers;
-                    wait=False
                     threads = []
 
                 self.logger.info("Status %d out of %d databases complete" % (db_count,number_source_dbs))
@@ -256,7 +253,7 @@ class App():
                         r = bulk.execute({ 'w' : 'majority' })
                         self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
                     except BulkWriteError as bwe:
-                        self.logger.error("bulk write error on %s.%x" % (db,collection))
+                        self.logger.error("bulk write error on %s.%s" % (db,collection))
                         self.logger.error(str(bwe))
                         self.logger.error("BulkWriteError.details=%s" % bwe.details)
                     doc_count=0
