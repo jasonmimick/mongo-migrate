@@ -19,11 +19,12 @@ import logging
 import sys, os
 import hashlib
 import argparse
+import traceback
 import threading
 from threading import Thread
-import traceback
 import multiprocessing
 import pickle
+from bson.json_util import dumps, loads
 
 OPLOG_TOMBSTONE_FILE = "mongo-migrate-tombstone"
 
@@ -61,6 +62,8 @@ class OplogConsumer(multiprocessing.Process):
                 self.logger.info('%s: Oplog Consumer Exiting - got SIGINT' % proc_name)
                 self.task_queue.task_done()
                 break
+            except Exception as exp:
+                raise exp
         return
 
     def process_op(self,op):
@@ -69,13 +72,31 @@ class OplogConsumer(multiprocessing.Process):
             tombstone = { "last_op" : op,
                           "when" : datetime.datetime.now(),
                           "nsToMigrate" : self.args.nsToMigrate,
-                          "v" : tool_version() }
+                          "v" : tool_version(),
+                          "source" : self.args.source }
             self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
-            pickle.dump(tombstone, open(OPLOG_TOMBSTONE_FILE, "wb" ))
+            self.update_tombstone(tombstone)
             return r
         except Exception as exp:
             self.logger.error(exp)
-            return exp
+            raise exp
+
+    def update_tombstone(self,tombstone):
+        print "update_tombstone"
+        temp_file = OPLOG_TOMBSTONE_FILE + ".temp"
+        self.logger.debug("update_tombstone: updating file=%s with %s" % (temp_file,str(tombstone)))
+        with open( temp_file, "w+", buffering=1) as f:
+            try:
+                f.write( dumps( tombstone ) )
+            except Exception as exp:
+                self.logger.error("update_tombstone: %s" % exp)
+                print str(exp)
+                raise exp
+            finally:
+                self.logger.debug("update_tombstone: attempting to rename '%s' to '%s')" % (temp_file,OPLOG_TOMBSTONE_FILE))
+                os.rename(temp_file,OPLOG_TOMBSTONE_FILE)
+                self.logger.debug("update_tombstone: complete")
+
 
 
 
@@ -100,25 +121,51 @@ class App():
             result = queue.get()
             logger.debug(result)
 
+    def validate_oplog_tombstone_return_last_ts(self,tombstone):
+        if not 'source' in tombstone:
+            raise Exception("Invalid tombstone - 'source' missing")
+        if not 'last_op' in tombstone:
+            raise Exception("Invalid tombstone = 'last_op' missing")
+        if not 'ts' in tombstone['last_op']:
+            raise Exception("Invalid tombstone = 'last_op' missing")
+
+        if not tombstone['source'] == self.args.source:
+            raise Exception("Tombstone has source connection string '%s', but mongo-migrate running against '%s'" % ( tombstone['source'], self.args.source))
+        if tombstone['v'] == tool_version():
+            ts=tombstone['last_op']['ts']
+        elif self.args.skipTombstoneVersionCheck:
+            self.logger.warn("Expected tool version %s but found %s, but allowed since --skipTombstoneVersionCheck was True" % (tool_version(), tombstone['v']))
+            ts=tombstone['last_op']['ts']
+        else:
+            self.logger.error("Found tombstone, but versions do not match. Expected %s but found %s" % (tool_version(), tombstone['v']))
+            self.logger.error("Check version of mongo-migrate or remove file '%s'" % OPLOG_TOMBSTONE_FILE)
+            raise Exception("Tool version in tombstone was not correct")
+
+        return ts
+
     def check_oplog_tombstone(self):
-        ts=0
         if os.path.exists(OPLOG_TOMBSTONE_FILE):
             try:
-                tombstone = pickle.load( open( OPLOG_TOMBSTONE_FILE, "rb") )
-                self.logger.info("Found and loaded tombstone=%s" % str(tombstone))
-                if tombstone['v'] == tool_version():
-                    ts=tombstone['last_op']['ts']
-                elif self.args.skipTombstoneVersionCheck:
-                    self.logger.warn("Expected tool version %s but found %s, but allowed since --skipTombstoneVersionCheck was True" % (tool_version(), tombstone['v']))
-                    ts=tombstone['last_op']['ts']
+                with open(OPLOG_TOMBSTONE_FILE) as tsf:
+                    raw = tsf.readline()
+                    tombstone = loads(raw)
+                    self.logger.info("Found and loaded tombstone=%s" % str(tombstone))
+                    return self.validate_oplog_tombstone_return_last_ts(tombstone)
+            except ValueError as ve:
+                self.logger.error(ve)
+                self.logger.error("tombstone was not correct format")
+                if not self.args.skipTombstoneVersionCheck:
+                    raise ve
                 else:
-                    self.logger.error("Found tombstone, but versions do not match. Expected %s but found %s" % (tool_version(), tombstone['v']))
-                    self.logger.error("Check version of mongo-migrate or remove file '%s'" % OPLOG_TOMBSTONE_FILE)
-                    raise Exception("Tool version in tombstone was not correct")
+                    self.logger.info("tombstone format allowed since --skipTombstoneVersionCheck was true")
+                    return 0
             except Exception as exp:
                 self.logger.error(exp)
+                traceback.print_exc()
                 raise exp
-        return ts
+        else:
+            self.logger.info("tombstone not found, will begin oplog sync from now")
+            return 0
 
     def should_migrate_ns(self,db,coll):
         self.logger.debug("self.nsToMigrate = %s" % self.nsToMigrate)
@@ -237,7 +284,6 @@ class App():
         bulk = dest_mongo[db][collection].initialize_unordered_bulk_op()
         batch_size = self.args.initialSyncBatchSize
         source_cursor = source_mongo[db][collection].find({},modifiers={"$snapshot":True})
-        source_cursor.batch_size(batch_size)
         while ( source_cursor.alive ):
             try:
                 doc = source_cursor.next()
@@ -343,7 +389,11 @@ class App():
         self.oplog_tasks_results_monitor.setDaemon(True)
         self.oplog_tasks_results_monitor.start()
         self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results,self.dest_mongo)
-        self.oplog_consumer.start()
+        try:
+            self.oplog_consumer.start()
+        except Exception as e:
+            self.logger.error(str(e))
+            traceback.print_exc()
 
 
         query = {}
@@ -359,7 +409,7 @@ class App():
             query['ns'] = { '$in' : self.nsToMigrate }
         self.logger.info('tail_oplog starting query=%s' % str(query))
         #start tailable cursor
-        oplog = self.source_mongo['local']['oplog.rs'].find(query,cursor_type=CursorType.TAILABLE)
+        oplog = self.source_mongo['local']['oplog.rs'].find(query,cursor_type=CursorType.TAILABLE).batch_size(self.args.oplogBatchSize)
         if 'ts' in query:
             oplog.add_option(8)     # oplogReplay
         sleep_cycles = 0
@@ -373,7 +423,6 @@ class App():
                     doc = oplog.next()
                     self.logger.info(doc)
                 self.oplog_tasks.put(doc)
-                #self.try_insert(sinkConnection,sinkNS,doc)
             except StopIteration:   #thrown when out of data so wait a little
                 self.logger.debug("sleep %i" % self.args.tailSleepTimeSeconds)
                 self.oplog_tasks.put( { "___.HeartbeatOp.___" : (datetime.datetime.now()) })
@@ -412,12 +461,6 @@ class App():
 
 
 def get_mongo_connection(uri):
-    #parsed_cs = deal_with_mongo_connection_string(uri)
-    #if ( parsed_cs.password ):
-    #    p = url.split('@')
-    #    pp = "mongodb://"+url[1]
-    #    return pymongo.MongoClient(pp,username=parsed_cs['username'],password=parsedd_cs['password'])
-    #else:
     return pymongo.MongoClient(uri,connect=False,w="majority")
 
 # deal with special characters in password
@@ -454,6 +497,7 @@ def main():
     parser.add_argument("--loglevel",default='info',help='loglevel debug,info default=info')
     parser.add_argument("--logfile",default='--',help='logfile full path or -- for stdout')
     parser.add_argument("--numInsertionWorkers",type=int,default=5,help='number of threads run parallel initial sync for collections, default 5')
+    parser.add_argument("--oplogBatchSize",type=int,default=1000,help='number of docs to pull from oplog at onetime')
     parser.add_argument("--tailSleepTimeSeconds",default=5,type=int,help='seconds to sleep when source oplog does not have new data, default 5')
     parser.add_argument("--collectionCheckSleepCycles",default=12,type=int,help='run collection checks after this many oplog tailing sleep cycles, default 12')
     parser.add_argument("--initialSyncBatchSize",default=1000,type=int,help='Batch size for initial sync, default 1000')
@@ -487,6 +531,7 @@ def main():
         logger.info('running...')
         if app.args.oplogOnly:
             ts = app.check_oplog_tombstone()
+            logger.debug('check_oplog_tombstone returned ts=%s' % str(ts))
             app.tail_oplog(ts)
         else:
             last_op_ts = app.initial_sync()
