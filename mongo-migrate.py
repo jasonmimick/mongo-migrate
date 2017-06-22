@@ -82,15 +82,13 @@ class OplogConsumer(multiprocessing.Process):
             raise exp
 
     def update_tombstone(self,tombstone):
-        print "update_tombstone"
         temp_file = OPLOG_TOMBSTONE_FILE + ".temp"
         self.logger.debug("update_tombstone: updating file=%s with %s" % (temp_file,str(tombstone)))
         with open( temp_file, "w+", buffering=1) as f:
             try:
                 f.write( dumps( tombstone ) )
             except Exception as exp:
-                self.logger.error("update_tombstone: %s" % exp)
-                print str(exp)
+                self.logger.error("update_tombstone: %s" % str(exp))
                 raise exp
             finally:
                 self.logger.debug("update_tombstone: attempting to rename '%s' to '%s')" % (temp_file,OPLOG_TOMBSTONE_FILE))
