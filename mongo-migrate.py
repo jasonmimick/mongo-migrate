@@ -377,6 +377,9 @@ class App():
         self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results,self.dest_mongo)
         try:
             self.oplog_consumer.start()
+            self.oplog_consumer.join(timeout=0)
+            if not self.oplog_consumer.is_alive():
+                raise Exception("unable to start Oplog Consumer to start")
         except Exception as e:
             self.logger.error(str(e))
             traceback.print_exc()
