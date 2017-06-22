@@ -70,34 +70,13 @@ class OplogConsumer(multiprocessing.Process):
         try:
             r = self.dest_mongo['admin'].command('applyOps',[op])
             self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
-            tombstone = OplogConsumer().get_tombstone(op,self.args)
-            OplogConsumer().update_tombstone(tombstone)
+            tombstone = get_tombstone(op,self.args)
+            update_tombstone(tombstone,self.logger)
             return r
         except Exception as exp:
             self.logger.error(exp)
             raise exp
 
-    def get_tombstone(op,args,ts=datetime.datetime.now()):
-        tombstone = { "last_op" : op,
-                          "when" : ts,
-                          "nsToMigrate" : self.args.nsToMigrate,
-                          "v" : tool_version(),
-                          "source" : self.args.source }
-        return tombstone
-
-    def update_tombstone(tombstone,logger):
-        temp_file = OPLOG_TOMBSTONE_FILE + ".temp"
-        logger.debug("update_tombstone: updating file=%s with %s" % (temp_file,str(tombstone)))
-        with open( temp_file, "w+", buffering=1) as f:
-            try:
-                f.write( dumps( tombstone ) )
-            except Exception as exp:
-                logger.error("update_tombstone: %s" % str(exp))
-                raise exp
-            finally:
-                logger.debug("update_tombstone: attempting to rename '%s' to '%s')" % (temp_file,OPLOG_TOMBSTONE_FILE))
-                os.rename(temp_file,OPLOG_TOMBSTONE_FILE)
-                logger.debug("update_tombstone: complete")
 
 
 
@@ -303,8 +282,9 @@ class App():
                         self.logger.debug("initial sync on %s.%s bulk.execute result=%s" % (db,collection,r))
                         if (self.initial_sync_initial_tombstone_not_written):
                             self.logger.info("initial_sync updating tombstone since we've written data")
-                            tombstone = OplogConsumer().get_tombstone(op,self.args)
-                            OplogConsumer().update_tombstone(tombstone)
+                            op = { "__mongo-migrate__" : "INITIAL_SYNC" }
+                            tombstone = get_tombstone(op,self.args)
+                            update_tombstone(tombstone,self.logger)
                             self.initial_sync_initial_tombstone_not_written = False
                     except BulkWriteError as bwe:
                         self.logger.error("bulk write error on %s.%s" % (db,collection))
@@ -467,6 +447,28 @@ class App():
                 self.logger.info('%s.%s.count() source=%i, destination=%i %s'
                                  % (db,coll,source_count,dest_count,ok))
 
+
+def get_tombstone(op,args,ts=datetime.datetime.now()):
+    tombstone = { "last_op" : op,
+                      "when" : ts,
+                      "nsToMigrate" : args.nsToMigrate,
+                      "v" : tool_version(),
+                      "source" : args.source }
+    return tombstone
+
+def update_tombstone(tombstone,logger):
+    temp_file = OPLOG_TOMBSTONE_FILE + ".temp"
+    logger.debug("update_tombstone: updating file=%s with %s" % (temp_file,str(tombstone)))
+    with open( temp_file, "w+", buffering=1) as f:
+        try:
+            f.write( dumps( tombstone ) )
+        except Exception as exp:
+            logger.error("update_tombstone: %s" % str(exp))
+            raise exp
+        finally:
+            logger.debug("update_tombstone: attempting to rename '%s' to '%s')" % (temp_file,OPLOG_TOMBSTONE_FILE))
+            os.rename(temp_file,OPLOG_TOMBSTONE_FILE)
+            logger.debug("update_tombstone: complete")
 
 def get_mongo_connection(uri):
     return pymongo.MongoClient(uri,connect=False,w="majority")
