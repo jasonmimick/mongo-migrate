@@ -69,31 +69,35 @@ class OplogConsumer(multiprocessing.Process):
     def process_op(self,op):
         try:
             r = self.dest_mongo['admin'].command('applyOps',[op])
-            tombstone = { "last_op" : op,
-                          "when" : datetime.datetime.now(),
-                          "nsToMigrate" : self.args.nsToMigrate,
-                          "v" : tool_version(),
-                          "source" : self.args.source }
             self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
-            self.update_tombstone(tombstone)
+            tombstone = OplogConsumer().get_tombstone(op,self.args)
+            OplogConsumer().update_tombstone(tombstone)
             return r
         except Exception as exp:
             self.logger.error(exp)
             raise exp
 
-    def update_tombstone(self,tombstone):
+    def get_tombstone(op,args,ts=datetime.datetime.now()):
+        tombstone = { "last_op" : op,
+                          "when" : ts,
+                          "nsToMigrate" : self.args.nsToMigrate,
+                          "v" : tool_version(),
+                          "source" : self.args.source }
+        return tombstone
+
+    def update_tombstone(tombstone,logger):
         temp_file = OPLOG_TOMBSTONE_FILE + ".temp"
-        self.logger.debug("update_tombstone: updating file=%s with %s" % (temp_file,str(tombstone)))
+        logger.debug("update_tombstone: updating file=%s with %s" % (temp_file,str(tombstone)))
         with open( temp_file, "w+", buffering=1) as f:
             try:
                 f.write( dumps( tombstone ) )
             except Exception as exp:
-                self.logger.error("update_tombstone: %s" % str(exp))
+                logger.error("update_tombstone: %s" % str(exp))
                 raise exp
             finally:
-                self.logger.debug("update_tombstone: attempting to rename '%s' to '%s')" % (temp_file,OPLOG_TOMBSTONE_FILE))
+                logger.debug("update_tombstone: attempting to rename '%s' to '%s')" % (temp_file,OPLOG_TOMBSTONE_FILE))
                 os.rename(temp_file,OPLOG_TOMBSTONE_FILE)
-                self.logger.debug("update_tombstone: complete")
+                logger.debug("update_tombstone: complete")
 
 
 
@@ -112,6 +116,7 @@ class App():
         self.nsToMigrate = filter(None,self.args.nsToMigrate.split(','))
         self.source_mongo = get_mongo_connection(self.source)
         self.dest_mongo = get_mongo_connection(self.destination)
+        self.initial_sync_initial_tombstone_not_written = True
 
     def monitor_oplog_tasks_results(self, queue, logger):
         logger.info("Oplog tasks results monitor started")
@@ -295,7 +300,12 @@ class App():
                 if (doc_count == batch_size ):
                     try:
                         r = bulk.execute({ 'w' : 'majority' })
-                        self.logger.debug("initial sync on %s.%s result=%s" % (db,collection,r))
+                        self.logger.debug("initial sync on %s.%s bulk.execute result=%s" % (db,collection,r))
+                        if (self.initial_sync_initial_tombstone_not_written):
+                            self.logger.info("initial_sync updating tombstone since we've written data")
+                            tombstone = OplogConsumer().get_tombstone(op,self.args)
+                            OplogConsumer().update_tombstone(tombstone)
+                            self.initial_sync_initial_tombstone_not_written = False
                     except BulkWriteError as bwe:
                         self.logger.error("bulk write error on %s.%s" % (db,collection))
                         self.logger.error(str(bwe))
