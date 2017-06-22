@@ -24,6 +24,7 @@ import threading
 from threading import Thread
 import multiprocessing
 import pickle
+import bson
 from bson.json_util import dumps, loads
 
 OPLOG_TOMBSTONE_FILE = "mongo-migrate-tombstone"
@@ -31,7 +32,7 @@ OPLOG_TOMBSTONE_FILE = "mongo-migrate-tombstone"
 class OplogConsumer(multiprocessing.Process):
 
     def __init__(self, args, logger, task_queue, result_queue, dest_mongo):
-        multiprocessing.Process.__init__(self)
+        multiprocessing.Process.__init__(self,target=self.run)
         self.task_queue = task_queue
         self.result_queue = result_queue
         self.args = args
@@ -63,22 +64,20 @@ class OplogConsumer(multiprocessing.Process):
                 self.task_queue.task_done()
                 break
             except Exception as exp:
+                self.logger.error("OplogConsumer run(): %s" % str(exp))
                 raise exp
         return
 
     def process_op(self,op):
         try:
             r = self.dest_mongo['admin'].command('applyOps',[op])
-            self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
             tombstone = get_tombstone(op,self.args)
+            self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
             update_tombstone(tombstone,self.logger)
             return r
         except Exception as exp:
             self.logger.error(exp)
             raise exp
-
-
-
 
 
 class App():
@@ -101,15 +100,13 @@ class App():
         logger.info("Oplog tasks results monitor started")
         while True:
             result = queue.get()
-            logger.debug(result)
+            logger.debug("monitor_oplog_tasks_results: %s" % str(result))
 
     def validate_oplog_tombstone_return_last_ts(self,tombstone):
-        if not 'source' in tombstone:
-            raise Exception("Invalid tombstone - 'source' missing")
-        if not 'last_op' in tombstone:
-            raise Exception("Invalid tombstone = 'last_op' missing")
-        if not 'ts' in tombstone['last_op']:
-            raise Exception("Invalid tombstone = 'last_op' missing")
+        self.logger.debug("validate tombstone: %s" % tombstone)
+        for key in ['source','last_op']:
+            if not key in tombstone:
+                raise Exception("Invalid tombstone - '%s' missing" % key)
 
         if not tombstone['source'] == self.args.source:
             raise Exception("Tombstone has source connection string '%s', but mongo-migrate running against '%s'" % ( tombstone['source'], self.args.source))
@@ -168,6 +165,13 @@ class App():
         self.initial_sync_status = {}
         last_oplog_doc = self.get_last_source_oplog_entry()
         self.initial_sync_status['last_source_oplog_entry'] = last_oplog_doc['ts']
+        if (self.initial_sync_initial_tombstone_not_written):
+            self.logger.info("initial_sync updating tombstone since we've written data")
+            op = last_oplog_doc
+            op["__mongo-migrate__"]="INITIAL_SYNC"
+            tombstone = get_tombstone(op,self.args)
+            update_tombstone(tombstone,self.logger)
+            self.initial_sync_initial_tombstone_not_written = False
 
         # get list of namespaces to sync
         source_dbs = self.source_mongo['admin'].command('listDatabases')
@@ -280,12 +284,6 @@ class App():
                     try:
                         r = bulk.execute({ 'w' : 'majority' })
                         self.logger.debug("initial sync on %s.%s bulk.execute result=%s" % (db,collection,r))
-                        if (self.initial_sync_initial_tombstone_not_written):
-                            self.logger.info("initial_sync updating tombstone since we've written data")
-                            op = { "__mongo-migrate__" : "INITIAL_SYNC" }
-                            tombstone = get_tombstone(op,self.args)
-                            update_tombstone(tombstone,self.logger)
-                            self.initial_sync_initial_tombstone_not_written = False
                     except BulkWriteError as bwe:
                         self.logger.error("bulk write error on %s.%s" % (db,collection))
                         self.logger.error(str(bwe))
@@ -382,7 +380,7 @@ class App():
         except Exception as e:
             self.logger.error(str(e))
             traceback.print_exc()
-
+            raise e
 
         query = {}
         if (start_ts==0):
@@ -409,8 +407,8 @@ class App():
                     break
                 else:
                     doc = oplog.next()
-                    self.logger.info(doc)
-                self.oplog_tasks.put(doc)
+                    self.logger.info("tail_oplog put: %s" % doc)
+                    self.oplog_tasks.put(doc)
             except StopIteration:   #thrown when out of data so wait a little
                 self.logger.debug("sleep %i" % self.args.tailSleepTimeSeconds)
                 self.oplog_tasks.put( { "___.HeartbeatOp.___" : (datetime.datetime.now()) })
@@ -448,12 +446,13 @@ class App():
                                  % (db,coll,source_count,dest_count,ok))
 
 
-def get_tombstone(op,args,ts=datetime.datetime.now()):
+def get_tombstone(op,args,ts=bson.timestamp.Timestamp(datetime.datetime.now(),0)):
     tombstone = { "last_op" : op,
                       "when" : ts,
                       "nsToMigrate" : args.nsToMigrate,
                       "v" : tool_version(),
-                      "source" : args.source }
+                      "source" : args.source,
+                      "destination" : args.destination }
     return tombstone
 
 def update_tombstone(tombstone,logger):
