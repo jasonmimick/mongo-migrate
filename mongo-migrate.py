@@ -55,6 +55,10 @@ class OplogConsumer(multiprocessing.Process):
                     self.logger.info('%s: Oplog Consumer Exiting' % proc_name)
                     self.task_queue.task_done()
                     break
+                # if next_op={} - debug log and go on
+                if not next_op:
+                    self.logger.debug("Oplog Consumer - got empty next_op, moving on")
+                    break
                 if '___.HeartbeatOp.___' in next_op:
                     heartbeat_count += 1
                     if (self.logger.getEffectiveLevel() == logging.DEBUG):
@@ -79,7 +83,7 @@ class OplogConsumer(multiprocessing.Process):
 
     def process_op(self,op,heartbeat_count):
         try:
-            r = self.dest_mongo['admin'].command('applyOps',[op])
+            r = self.dest_mongo['admin'].command({'applyOps':[op]})
             tombstone = get_tombstone(op,self.args)
             if self.logger.getEffectiveLevel() == logging.DEBUG:
                 self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
