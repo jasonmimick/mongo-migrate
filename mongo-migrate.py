@@ -12,6 +12,7 @@
 import datetime
 import urllib
 import pymongo
+from pymongo.errors import OperationFailure
 from pymongo.errors import BulkWriteError
 from pymongo.cursor import CursorType
 import time
