@@ -40,6 +40,8 @@ class OplogConsumer(multiprocessing.Process):
         self.logger = logger
         self.destination = args.destination
         self.dest_mongo = get_mongo_connection(self.destination)
+        self.process_op_retry = 0
+        self.MAX_PROCESS_OP_RETRIES = 3
         #self.daemon = True
 
     def run(self):
@@ -91,6 +93,16 @@ class OplogConsumer(multiprocessing.Process):
                 self.logger.info("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
             update_tombstone(tombstone,self.logger)
             return r
+        except OperationFailure as op_fail:
+            self.logger.error("Oplog Consumer OperationFailure calling applyOps with op=%s error=%s" % (op, op_fail))
+            self.process_op_retry += 1
+            if (self.process_op_retry < self.MAX_PROCESS_OP_RETRIES ):
+                self.logger.error("Attempting try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
+                self.process_op(op)
+            else:
+                self.logger.error("Failed try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
+                raise op_fail
+
         except Exception as exp:
             self.logger.error(exp)
             raise exp
