@@ -26,37 +26,45 @@ import multiprocessing
 import pickle
 import bson
 from bson.json_util import dumps, loads
+import socket
 
 OPLOG_TOMBSTONE_FILE = "mongo-migrate-tombstone"
 
 class OplogConsumer(multiprocessing.Process):
 
-    def __init__(self, args, logger, task_queue, result_queue, dest_mongo):
+    def __init__(self, args, logger, task_queue, result_queue):
         multiprocessing.Process.__init__(self,target=self.run)
         self.task_queue = task_queue
         self.result_queue = result_queue
         self.args = args
         self.logger = logger
         self.destination = args.destination
-        self.dest_mongo = dest_mongo
-        self.daemon = True
+        self.dest_mongo = get_mongo_connection(self.destination)
+        #self.daemon = True
 
     def run(self):
         self.logger.info("Oplog Consumer run()")
         proc_name = self.name
+        heartbeat_count = 0
         while True:
             try:
                 next_op = self.task_queue.get()
+                self.logger.debug('next_op=%s'%next_op)
                 if next_op is None:
                     # Poison pill means shutdown
                     self.logger.info('%s: Oplog Consumer Exiting' % proc_name)
                     self.task_queue.task_done()
                     break
                 if '___.HeartbeatOp.___' in next_op:
-                    self.logger.debug('Oplog Consumer got heartbeat at %s' % (next_op['___.HeartbeatOp.___']))
-                    continue
-                self.logger.debug('%s: %s' % (proc_name, next_op))
-                result = self.process_op(next_op)
+                    heartbeat_count += 1
+                    if (self.logger.getEffectiveLevel() == logging.DEBUG):
+                        self.logger.debug('Oplog Consumer got heartbeat at %s' % (next_op['___.HeartbeatOp.___']))
+                        continue
+                    if (heartbeat_count % 100)==1:
+                        self.logger.info('Oplog Consumer got heartbeat at %s' % (next_op['___.HeartbeatOp.___']))
+                        continue
+                self.logger.debug('%s next_op: %s' % (proc_name, next_op))
+                result = self.process_op(next_op,heartbeat_count)
                 self.task_queue.task_done()
                 self.result_queue.put(result)
             except (KeyboardInterrupt, SystemExit):
@@ -65,14 +73,18 @@ class OplogConsumer(multiprocessing.Process):
                 break
             except Exception as exp:
                 self.logger.error("OplogConsumer run(): %s" % str(exp))
+                traceback.print_exc()
                 raise exp
         return
 
-    def process_op(self,op):
+    def process_op(self,op,heartbeat_count):
         try:
             r = self.dest_mongo['admin'].command('applyOps',[op])
             tombstone = get_tombstone(op,self.args)
-            self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
+            if self.logger.getEffectiveLevel() == logging.DEBUG:
+                self.logger.debug("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
+            if (heartbeat_count % 1000)==1:
+                self.logger.info("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
             update_tombstone(tombstone,self.logger)
             return r
         except Exception as exp:
@@ -358,7 +370,6 @@ class App():
 
     def get_last_source_oplog_entry(self):
         self.logger.debug('starting to fetch last oplog entry on source')
-        self.source_mongo = get_mongo_connection(self.source)
         last_oplog_entry_cursor = self.source_mongo['local']['oplog.rs'].find({}).sort("ts",-1).limit(1)
         last_oplog_entry = last_oplog_entry_cursor.next()
         self.logger.debug('last oplog entry %s' % last_oplog_entry)
@@ -374,10 +385,10 @@ class App():
                                                  args=(self.oplog_tasks_results,self.logger))
         self.oplog_tasks_results_monitor.setDaemon(True)
         self.oplog_tasks_results_monitor.start()
-        self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results,self.dest_mongo)
+        self.oplog_consumer = OplogConsumer(self.args,self.logger,self.oplog_tasks,self.oplog_tasks_results)
         try:
             self.oplog_consumer.start()
-            self.oplog_consumer.join(timeout=0)
+            self.oplog_consumer.join(timeout=10)
             if not self.oplog_consumer.is_alive():
                 raise Exception("unable to start Oplog Consumer to start")
         except Exception as e:
@@ -410,7 +421,7 @@ class App():
                     break
                 else:
                     doc = oplog.next()
-                    self.logger.info("tail_oplog put: %s" % doc)
+                    self.logger.debug("tail_oplog put: %s" % doc)
                     self.oplog_tasks.put(doc)
             except StopIteration:   #thrown when out of data so wait a little
                 self.logger.debug("sleep %i" % self.args.tailSleepTimeSeconds)
@@ -494,6 +505,7 @@ def tool_version():
 
 def main():
 
+
     # parse arguments
     description = u'mongo-migrate - replica set synchonization tool'
     parser = argparse.ArgumentParser(description=description)
@@ -509,9 +521,10 @@ def main():
     parser.add_argument("--loglevel",default='info',help='loglevel debug,info default=info')
     parser.add_argument("--logfile",default='--',help='logfile full path or -- for stdout')
     parser.add_argument("--numInsertionWorkers",type=int,default=5,help='number of threads run parallel initial sync for collections, default 5')
+    parser.add_argument("--migrateLockPort",type=int,default=27071,help='port which is locked on host to prevent multiple instances of mongo-migrate running on same host, default=27071')
     parser.add_argument("--oplogBatchSize",type=int,default=1000,help='number of docs to pull from oplog at onetime')
     parser.add_argument("--tailSleepTimeSeconds",default=5,type=int,help='seconds to sleep when source oplog does not have new data, default 5')
-    parser.add_argument("--collectionCheckSleepCycles",default=12,type=int,help='run collection checks after this many oplog tailing sleep cycles, default 12')
+    parser.add_argument("--collectionCheckSleepCycles",default=100,type=int,help='run collection checks after this many oplog tailing sleep cycles, default 12')
     parser.add_argument("--initialSyncBatchSize",default=1000,type=int,help='Batch size for initial sync, default 1000')
     args = parser.parse_args()
     logger = logging.getLogger("mongo-migrate")
@@ -537,6 +550,17 @@ def main():
         logger.error("mongo-migrate.py: error: argument --destination is required")
         os._exit(1)
 
+    # prevent multiple instances of mongo-migrate.py running
+    # on same host
+    try:
+        sock = socket.socket()
+        host = socket.gethostname()
+        sock.bind( (host, args.migrateLockPort) )
+    except Exception as exp:
+        import syslog
+        syslog.message("Unable to bind to --migrateLockPort=%i. Check that another instance of mongo-migrate.py is not running." % args.migrateLockPort)
+        syslog.message("migrateLockPort Exception=%s" % exp)
+        os._exit(1)
     app = App(args, logger)
     logger.info('mongo-migrate initialized')
     try:
