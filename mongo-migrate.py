@@ -558,8 +558,8 @@ def main():
         sock.bind( (host, args.migrateLockPort) )
     except Exception as exp:
         import syslog
-        syslog.message("Unable to bind to --migrateLockPort=%i. Check that another instance of mongo-migrate.py is not running." % args.migrateLockPort)
-        syslog.message("migrateLockPort Exception=%s" % exp)
+        syslog.syslog("Unable to bind to --migrateLockPort=%i. Check that another instance of mongo-migrate.py is not running." % args.migrateLockPort)
+        syslog.syslog("migrateLockPort Exception=%s" % exp)
         os._exit(1)
     app = App(args, logger)
     logger.info('mongo-migrate initialized')
