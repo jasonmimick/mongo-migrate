@@ -70,6 +70,8 @@ class OplogConsumer(multiprocessing.Process):
                     if (heartbeat_count % 100)==1:
                         self.logger.info('Oplog Consumer got heartbeat at %s' % (next_op['___.HeartbeatOp.___']))
                         continue
+                    else:
+                        continue
                 self.logger.debug('%s next_op: %s' % (proc_name, next_op))
                 result = self.process_op(next_op,heartbeat_count)
                 self.task_queue.task_done()
@@ -80,6 +82,7 @@ class OplogConsumer(multiprocessing.Process):
                 break
             except Exception as exp:
                 self.logger.error("OplogConsumer run(): %s" % str(exp))
+                self.result_queue.put(exp)
                 traceback.print_exc()
                 raise exp
         return
@@ -99,7 +102,7 @@ class OplogConsumer(multiprocessing.Process):
             self.process_op_retry += 1
             if (self.process_op_retry < self.MAX_PROCESS_OP_RETRIES ):
                 self.logger.error("Attempting try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
-                self.process_op(op)
+                self.process_op(op,heartbeat_count)
             else:
                 self.logger.error("Failed try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
                 raise op_fail
@@ -129,6 +132,11 @@ class App():
         logger.info("Oplog tasks results monitor started")
         while True:
             result = queue.get()
+            if result is Exception:
+                logger.error("Oplog Tasks Result monitor got exception %s" %result)
+                logger.error("Unable to apply oplog entry, shutting down")
+                os._exit(1)
+
             logger.debug("monitor_oplog_tasks_results: %s" % str(result))
 
     def validate_oplog_tombstone_return_last_ts(self,tombstone):
