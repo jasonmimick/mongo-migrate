@@ -84,7 +84,7 @@ class OplogConsumer(multiprocessing.Process):
                 self.logger.error("OplogConsumer run(): %s" % str(exp))
                 self.result_queue.put(exp)
                 traceback.print_exc()
-                raise exp
+                os._exit(1)
         return
 
     def process_op(self,op,heartbeat_count):
@@ -106,11 +106,12 @@ class OplogConsumer(multiprocessing.Process):
             else:
                 self.logger.error("Failed try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
                 self.result_queue.put(op_fail)
-                raise op_fail
+                #raise op_fail
 
         except Exception as exp:
             self.logger.error(exp)
-            raise exp
+            self.result_queue.put(exp)
+            #raise exp
 
 
 class App():
