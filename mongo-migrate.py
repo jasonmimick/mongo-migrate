@@ -106,11 +106,13 @@ class OplogConsumer(multiprocessing.Process):
             else:
                 self.logger.error("Failed try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
                 self.result_queue.put(op_fail)
+                os._exit(1)
                 #raise op_fail
 
         except Exception as exp:
             self.logger.error(exp)
             self.result_queue.put(exp)
+            os._exit(1)
             #raise exp
 
 
