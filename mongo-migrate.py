@@ -87,8 +87,19 @@ class OplogConsumer(multiprocessing.Process):
                 os._exit(1)
         return
 
+    def ensure_collection(self,op):
+        self.logger.debug("ensure_collection for op=%s" % op)
+        ns = op['o']['ns'].split('.')
+        db = ns[0]
+        coll = ns[1:]
+        self.logger.debug("ensure_collection attempting to create %s.%s" % (db,coll))
+        self.dest_mongo[db].create_collection(coll)
+        self.logger.debug("ensure_collection created %s.%s" % (db,coll))
+
     def process_op(self,op,heartbeat_count):
         try:
+            if op['op']==i and not (op['ns'].index('system.index') == -1):
+                self.ensure_collection(op)
             r = self.dest_mongo['admin'].command({'applyOps':[op]})
             tombstone = get_tombstone(op,self.args)
             if self.logger.getEffectiveLevel() == logging.DEBUG:
@@ -112,7 +123,7 @@ class OplogConsumer(multiprocessing.Process):
         except Exception as exp:
             self.logger.error(exp)
             self.result_queue.put(exp)
-            os._exit(1)
+            #os._exit(1)
             #raise exp
 
 
@@ -136,6 +147,7 @@ class App():
         logger.info("Oplog tasks results monitor started")
         while True:
             result = queue.get()
+            logger.info("monitor_oplog_tasks_results str(result)=%s, result=%s" % (result,str(result)))
             if result is Exception:
                 logger.error("Oplog Tasks Result monitor got exception %s" %result)
                 logger.error("Unable to apply oplog entry, shutting down")
