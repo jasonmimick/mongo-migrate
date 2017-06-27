@@ -147,7 +147,7 @@ class App():
         logger.info("Oplog tasks results monitor started")
         while True:
             result = queue.get()
-            logger.info("monitor_oplog_tasks_results str(result)=%s, result=%s" % (result,str(result)))
+            logger.debug("monitor_oplog_tasks_results str(result)=%s, result=%s" % (result,str(result)))
             if result is Exception:
                 logger.error("Oplog Tasks Result monitor got exception %s" %result)
                 logger.error("Unable to apply oplog entry, shutting down")
@@ -493,12 +493,12 @@ class App():
                 dest_count = self.dest_mongo[db][coll].count()
                 ok = ''
                 if (source_count==dest_count):
-                    ok = 'Looks good!'
+                    self.logger.info('%s.%s.count() source=%i, destination=%i Looks good'
+                                 % (db,coll,source_count,dest_count))
                 else:
-                    ok = "ERROR!"
-                    self.logger.error('%s.%s counts did not match!' % (db,coll))
-                self.logger.info('%s.%s.count() source=%i, destination=%i %s'
-                                 % (db,coll,source_count,dest_count,ok))
+                    err = 'ERROR! %s.%s counts did not match!' % (db,coll)
+                    self.logger.error(err)
+                    raise err
 
 
 def get_tombstone(op,args,ts=bson.timestamp.Timestamp(datetime.datetime.now(),0)):
