@@ -498,7 +498,7 @@ class App():
                 else:
                     err = 'ERROR! %s.%s counts did not match!' % (db,coll)
                     self.logger.error(err)
-                    raise err
+                    raise Exception(err)
 
 
 def get_tombstone(op,args,ts=bson.timestamp.Timestamp(datetime.datetime.now(),0)):
