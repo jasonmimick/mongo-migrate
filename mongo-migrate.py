@@ -471,7 +471,10 @@ class App():
                 sleep_cycles += 1
                 if (sleep_cycles % self.args.collectionCheckSleepCycles)==0:
                     self.logger.info("sleeping...")
-                    self.run_collection_checks()
+                    try:
+                        self.run_collection_checks()
+                    except Exception as exp:
+                        raise (exp)
 
     def run_collection_checks(self):
         self.logger.info('Running collection checks')
@@ -624,6 +627,8 @@ def main():
         logger.error(exp)
         logger.debug("got exception going to call sys.exit(1)")
         traceback.print_exc()
+        if not app.oplog_consumer is None:
+            self.oplgo_consumer.terminate()
         os._exit(1)
 
 
