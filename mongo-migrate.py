@@ -117,14 +117,12 @@ class OplogConsumer(multiprocessing.Process):
             else:
                 self.logger.error("Failed try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
                 self.result_queue.put(op_fail)
-                os._exit(1)
-                #raise op_fail
+                raise op_fail
 
         except Exception as exp:
             self.logger.error(exp)
             self.result_queue.put(exp)
-            #os._exit(1)
-            #raise exp
+            os._exit(1)
 
 
 class App():
@@ -142,6 +140,7 @@ class App():
         self.source_mongo = get_mongo_connection(self.source)
         self.dest_mongo = get_mongo_connection(self.destination)
         self.initial_sync_initial_tombstone_not_written = True
+        self.oplog_consumer = None
 
     def monitor_oplog_tasks_results(self, queue, logger):
         logger.info("Oplog tasks results monitor started")
@@ -628,7 +627,7 @@ def main():
         logger.debug("got exception going to call sys.exit(1)")
         traceback.print_exc()
         if not app.oplog_consumer is None:
-            self.oplgo_consumer.terminate()
+            app.oplog_consumer.terminate()
         os._exit(1)
 
 
