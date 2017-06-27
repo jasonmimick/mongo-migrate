@@ -98,7 +98,7 @@ class OplogConsumer(multiprocessing.Process):
 
     def process_op(self,op,heartbeat_count):
         try:
-            if op['op']=='i' and not (op['ns'].index('system.index') == -1):
+            if op['op']=='i' and not (op['ns'].find('system.index') == -1):
                 self.ensure_collection(op)
             r = self.dest_mongo['admin'].command({'applyOps':[op]})
             tombstone = get_tombstone(op,self.args)
