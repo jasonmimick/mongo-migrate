@@ -110,6 +110,9 @@ class OplogConsumer(multiprocessing.Process):
             return r
         except OperationFailure as op_fail:
             self.logger.error("Oplog Consumer OperationFailure calling applyOps with op=%s error=%s" % (op, op_fail))
+            if not error.find(MISSING_COLLECTION_ERROR) == -1:
+                self.logger.info("Detected missing collection error, possibly due to pre 3.x MongoDB not sending command to create collection, attempting to create")
+                self.ensure_collection(op)
             self.process_op_retry += 1
             if (self.process_op_retry < self.MAX_PROCESS_OP_RETRIES ):
                 self.logger.error("Attempting try %i/%i" % (self.process_op_retry, self.MAX_PROCESS_OP_RETRIES))
