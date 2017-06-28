@@ -30,7 +30,7 @@ from bson.json_util import dumps, loads
 import socket
 
 OPLOG_TOMBSTONE_FILE = "mongo-migrate-tombstone"
-
+MISSING_COLLECTION_ERROR = "Failed to apply insert due to missing collection"
 class OplogConsumer(multiprocessing.Process):
 
     def __init__(self, args, logger, task_queue, result_queue):
@@ -89,9 +89,9 @@ class OplogConsumer(multiprocessing.Process):
 
     def ensure_collection(self,op):
         self.logger.debug("ensure_collection for op=%s" % op)
-        ns = op['o']['ns'].split('.')
+        ns = op['ns'].split('.')
         db = ns[0]
-        coll = ns[1:]
+        coll = str.join(',',ns[1:])
         self.logger.debug("ensure_collection attempting to create %s.%s" % (db,coll))
         self.dest_mongo[db].create_collection(coll)
         self.logger.debug("ensure_collection created %s.%s" % (db,coll))
@@ -110,7 +110,7 @@ class OplogConsumer(multiprocessing.Process):
             return r
         except OperationFailure as op_fail:
             self.logger.error("Oplog Consumer OperationFailure calling applyOps with op=%s error=%s" % (op, op_fail))
-            if not error.find(MISSING_COLLECTION_ERROR) == -1:
+            if not str(op_fail).find(MISSING_COLLECTION_ERROR) == -1:
                 self.logger.info("Detected missing collection error, possibly due to pre 3.x MongoDB not sending command to create collection, attempting to create")
                 self.ensure_collection(op)
             self.process_op_retry += 1
