@@ -91,9 +91,10 @@ class OplogConsumer(multiprocessing.Process):
         self.logger.debug("ensure_collection for op=%s" % op)
         ns = op['ns'].split('.')
         db = ns[0]
-        coll = str.join(',',ns[1:])
+        coll = str.join('.',ns[1:])
         self.logger.debug("ensure_collection attempting to create %s.%s" % (db,coll))
-        self.dest_mongo[db].create_collection(coll)
+        if not (coll in self.dest_mongo[db].collection_names()):
+            self.dest_mongo[db].create_collection(coll)
         self.logger.debug("ensure_collection created %s.%s" % (db,coll))
 
     def process_op(self,op,heartbeat_count):
