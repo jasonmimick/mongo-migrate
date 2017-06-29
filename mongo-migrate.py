@@ -107,6 +107,9 @@ class OplogConsumer(multiprocessing.Process):
             if (heartbeat_count % 1000)==1:
                 self.logger.info("writing tombstone=%s to %s" % (str(tombstone),OPLOG_TOMBSTONE_FILE))
             update_tombstone(tombstone,self.logger)
+            # only here if applyOps didn't error
+            # reset retry counter
+            self.process_op_retry = 0
             return r
         except OperationFailure as op_fail:
             self.logger.error("Oplog Consumer OperationFailure calling applyOps with op=%s error=%s" % (op, op_fail))
@@ -471,12 +474,13 @@ class App():
                 self.oplog_tasks.put( { "___.HeartbeatOp.___" : (datetime.datetime.now()) })
                 time.sleep(self.args.tailSleepTimeSeconds)
                 sleep_cycles += 1
-                if (sleep_cycles % self.args.collectionCheckSleepCycles)==0:
-                    self.logger.info("sleeping...")
-                    try:
-                        self.run_collection_checks()
-                    except Exception as exp:
-                        raise (exp)
+                if not self.args.skipCollectionChecks:
+                    if (sleep_cycles % self.args.collectionCheckSleepCycles)==0:
+                        self.logger.info("sleeping...")
+                        try:
+                            self.run_collection_checks()
+                        except Exception as exp:
+                            raise (exp)
 
     def run_collection_checks(self):
         self.logger.info('Running collection checks')
@@ -559,6 +563,7 @@ def main():
     parser.add_argument("--source",help='mongodb uri for source replica set')
     parser.add_argument("--destination",help='mongodb uri for destination replica set')
     parser.add_argument("--oplogOnly",action='store_true',default=False,help='only stream oplog from source to destination')
+    parser.add_argument("--skipCollectionChecks",action='store_true',default=False,help='skip validation of document counts between source and destination when oplog tail is sleeping, default is False')
     parser.add_argument("--skipTombstoneVersionCheck",action='store_true',default=False,help='allow tombstone file from another version of mongo-migrate.py, may fail if tombstone format changes')
     parser.add_argument("--initialSyncOnly",action='store_true',default=False,help='only all data from source to destination, do not append oplog entries')
     parser.add_argument("--dropOnDestination",action='store_true',default=False,help='drop collections on destination, default False')
